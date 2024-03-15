@@ -9,3 +9,6 @@ So far this iteration consists of the pair generation, building and training of 
 
 Further research indicates utilizing triplet loss may lead to better accuracy. Working on implementation
 3/2 - Implemented Triplet Loss full code update -- Currently not fully functional, debugging tensorflow handling of arrays
+
+
+3/14 - Tensorflow issues debugged as well as sizing errors. Code is now functional and able to train the network but training of 10 epochs takes around 2 hours on my local machine. Likely need to debug further
