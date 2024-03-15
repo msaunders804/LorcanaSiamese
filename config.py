@@ -1,6 +1,6 @@
 import os
 
-IMG_SHAPE = (28,28,1)
+IMG_SHAPE = (224,312,1)
 BATCH_SIZE = 64
 EPOCHS = 10
 

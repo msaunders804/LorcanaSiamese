@@ -1,41 +1,168 @@
-import buildPairs, generation
-import trainSiamese
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, Model, losses, optimizers
+from PIL import Image
+import matplotlib.pyplot as plt
+
+# Define the Siamese Network architecture
+def create_siamese_network(input_shape):
+    input_anchor = layers.Input(shape=input_shape)
+    input_positive = layers.Input(shape=input_shape)
+    input_negative = layers.Input(shape=input_shape)
+    base_model = tf.keras.applications.ResNet50(
+        include_top=False, weights="imagenet", input_shape=input_shape
+    )
+    for layer in base_model.layers:
+        layer.trainable = False
+
+    processed_anchor = base_model(input_anchor)
+    processed_positive = base_model(input_positive)
+    processed_negative = base_model(input_negative)
+
+    # Output embedding for each input
+    flatten_anchor = layers.Flatten()(processed_anchor)
+    flatten_positive = layers.Flatten()(processed_positive)
+    flatten_negative = layers.Flatten()(processed_negative)
+
+    dense_anchor = layers.Dense(128, activation="relu")(flatten_anchor)
+    dense_positive = layers.Dense(128, activation="relu")(flatten_positive)
+    dense_negative = layers.Dense(128, activation="relu")(flatten_negative)
+
+    output_anchor = layers.Lambda(lambda x: tf.math.l2_normalize(x, axis=1))(dense_anchor)
+    output_positive = layers.Lambda(lambda x: tf.math.l2_normalize(x, axis=1))(dense_positive)
+    output_negative = layers.Lambda(lambda x: tf.math.l2_normalize(x, axis=1))(dense_negative)
+
+    return Model(inputs=[input_anchor, input_positive, input_negative],
+                 outputs=[output_anchor, output_positive, output_negative])
+
+# Define the triplet loss function
+class TripletLoss(losses.Loss):
+    def __init__(self, margin=0.5):
+        super().__init__()
+        self.margin = margin
+
+    def call(self, y_true, y_pred):
+        anchor, positive, negative = y_pred[0], y_pred[1], y_pred[2]
+        pos_dist = tf.reduce_sum(tf.square(anchor - positive), axis=-1)
+        neg_dist = tf.reduce_sum(tf.square(anchor - negative), axis=-1)
+        loss = tf.maximum(pos_dist - neg_dist + self.margin, 0.0)
+        return tf.reduce_mean(loss)
+
+# Load data
+def load_data(directory, target_size=(224, 312)):
+    images = []
+    labels = []
+    for path in os.listdir(directory):
+        if path.endswith('.jpg'):
+            image_path = os.path.join(directory, path)
+            img = Image.open(image_path)
+            img = img.convert('RGB')
+            resized_image = img.resize(target_size, Image.LANCZOS)
+            img_array = np.array(resized_image)
+            if len(img_array.shape) ==3:
+                images.append(np.array(resized_image))
+                label = int(path.split('-')[0])  # Assuming label is the first part before '-'
+                labels.append(label)
+            else:
+                print(img_array.shape)
+    return np.array(images, dtype=float), np.array(labels)
+
+# Generate triplets
+'''def make_triplets(images, labels):
+    triplets = []
+    num_classes = len(np.unique(labels))
+    indices = [np.where(labels == i)[0] for i in range(num_classes)]
+
+    for class_idx in indices:
+        for i, anchor_idx in enumerate(class_idx):
+            for j in range(i+1, len(class_idx)):
+                positive_idx = class_idx[i]
+                negative_idx = np.random.choice(np.setdiff1d(class_idx, [anchor_idx, positive_idx]))
+                triplets.append([images[anchor_idx], images[positive_idx], images[negative_idx]])
+    return np.array(triplets)'''
+
+def triplet_generator(images, labels, batch_size):
+    while True:
+        indices = np.random.permutation(len(labels))
+        for i in range(0, len(indices), batch_size):
+            batch_indices = indices[i:i+batch_size]
+            anchor_batch = images[batch_indices]
+            positive_batch = images[np.random.choice(batch_indices, batch_size)]
+            negative_batch = images[np.random.choice(len(labels), size=batch_size, replace=True)]
+
+            yield [anchor_batch, positive_batch, negative_batch], np.zeros(batch_size)
+
+# Siamese network model
+def build_siamese(input_shape):
+    input_layer = layers.Input(shape=input_shape)
+    x = layers.Conv2D(32, (3, 3), activation='relu')(input_layer)
+    x = layers.MaxPooling2D((2, 2))(x)
+    x = layers.Conv2D(64, (3, 3), activation='relu')(x)
+    x = layers.MaxPooling2D((2, 2))(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation='relu')(x)
+
+    return Model(inputs=input_layer, outputs=x)
+
+# Training plot
+def training_plot(history, plot_path):
+    plt.style.use("ggplot")
+    plt.figure()
+    plt.plot(history.history["loss"], label="train_loss")
+    plt.plot(history.history["val_loss"], label="val_loss")
+    plt.title("Training Loss")
+    plt.xlabel("Epoch #")
+    plt.ylabel("Loss")
+    plt.legend(loc="lower left")
+    plt.savefig(plot_path)
+
+# Load data and create triplets
+train_path = input("Enter the path of the training images: ")
+test_path = input("Enter the path of the test images: ")
+trainX, trainY = load_data(train_path)
+testX, testY = load_data(test_path)
+trainX /= 255.0
+testX /= 255.0
+#trainX = np.expand_dims(trainX, axis=-1)
+#testX = np.expand_dims(testX, axis=-1)
+
+tripletsTrain = triplet_generator(trainX, trainY, batch_size=32)
+for i, (inputs, _) in enumerate(tripletsTrain):
+    anchor_batch, positive_batch, negative_batch = inputs
+    if i == 5:  # Print only the first few batches
+        break
+tripletsTest = triplet_generator(testX, testY, batch_size=32)
+
+# Create and compile the Siamese network
+input_shape = (312,224, 3)  # Adjust based on your image size
+siamese_net = create_siamese_network(input_shape)
+siamese_net.compile(optimizer=optimizers.Adam(), loss=TripletLoss())
+
+# Train the Siamese network
+'''history = siamese_net.fit([tripletsTrain_tensor[:, :, :, 0],
+                           tripletsTrain_tensor[:, :, :, 1],
+                           tripletsTrain_tensor[:, :, :, 2]],
+                          np.zeros(len(tripletsTrain_tensor)),
+                          validation_data=([tripletsTest_tensor[:, :, :, 0],
+                                            tripletsTest_tensor[:, :, :, 1],
+                                            tripletsTest_tensor[:, :, :, 2]],
+                                           np.zeros(len(tripletsTest_tensor))),
+                          batch_size=32, epochs=10)'''
 
 
-def DisplayMenu():
-    print("===== Menu =====")
-    print("1. Build Pairs")
-    print("2. Train Model")
-    print("3. Generate Images")
-    print("4. Exit")
-    print("=================")
+history = siamese_net.fit(tripletsTrain,
+                          steps_per_epoch=len(trainX) // 32,
+                          epochs=10,
+                          validation_data=tripletsTest,
+                          validation_steps=len(testX) // 32)
 
-def ExecuteChoice(choice):
-    if choice == 1:
-        buildPairs.load_pairs()
-    elif choice == 2:
-        trainSiamese.trainSiamese()
-    elif choice == 3:
-        path = input("Enter the path of your images: ")
-        num = int(input("How many distortions do you want "))
-        generation.GenerateDistorted(path, num)
+# Save the model
+siamese_net.save("siamese_model.h5")
 
+# Plot training history
+training_plot(history, "training_plot.png")
 
-def main():
-    choice = 0
-    while choice != 4:
-        DisplayMenu()
-        try:
-            choice = int(input("Enter Choice Number: "))
-            while choice > 4:
-                print("Please Enter A Valid Choice: ", end="")
-                choice = int(input())
-            ExecuteChoice(choice)
-            input("Press Enter to continue...")
-        except ValueError as e:
-            print("Invalid input. Please enter a number.")
-            print(e)
-
-
-if __name__ == "__main__":
-    main()
+# Inference: Given a new trading card, compute its embedding and compare with others
+# Enjoy identifying similar trading cards!
